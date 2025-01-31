@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+google-generativeai
+langchain
+langchain_groq
+sentence-transformers
+pinecone-client
+pydantic
+groq
