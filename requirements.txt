@@ -8,3 +8,4 @@ sentence-transformers
 pinecone-client
 pydantic
 groq
+langchain-community
