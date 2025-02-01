@@ -9,3 +9,4 @@ pinecone-client
 pydantic
 groq
 langchain-community
+langchain-pinecone
