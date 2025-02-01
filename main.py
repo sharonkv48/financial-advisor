@@ -4,9 +4,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
-from pinecone import Pinecone, ServerlessSpec
-from langchain.vectorstores import Pinecone as LangchainPinecone
-from langchain.embeddings import HuggingFaceEmbeddings
+from pinecone import Pinecone
+from langchain_community.vectorstores import PineconeVectorStore
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
@@ -37,7 +37,7 @@ class FinancialAdvisorBot:
 
         # Initialize Pinecone vector store
         pinecone_index = pc.Index(index_name)
-        vectorstore = LangchainPinecone(
+        vectorstore = PineconeVectorStore(
             index=pinecone_index, 
             embedding=hugging_face_embeddings,
             text_key='text'
