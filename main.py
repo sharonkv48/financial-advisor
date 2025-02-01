@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
 from pinecone import Pinecone, ServerlessSpec
-from langchain_pinecone import Pinecone as LangchainPinecone  # Updated import
+from langchain.vectorstores import Pinecone as LangchainPinecone
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
@@ -31,14 +31,14 @@ class FinancialAdvisorBot:
         """Initialize QA components with Pinecone"""
         # Initialize embeddings
         hugging_face_embeddings = HuggingFaceEmbeddings(
-            model_name='sentence-transformers/all-MiniLM-L6-v2', 
+            model_name='sentence-transformers/all-MiniLM-L6-V2', 
             model_kwargs={'device': 'cpu'}
         )
 
-        # Initialize Pinecone vector store with updated import
+        # Initialize Pinecone vector store
         pinecone_index = pc.Index(index_name)
         vectorstore = LangchainPinecone(
-            pinecone_index=pinecone_index,  # Updated parameter name
+            index=pinecone_index, 
             embedding=hugging_face_embeddings,
             text_key='text'
         )
@@ -133,11 +133,6 @@ bot = FinancialAdvisorBot()
 async def startup_event():
     """Initialize the QA bot on startup"""
     await bot.initialize_qa_bot()
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {"message": "Financial Advisor API is running"}
 
 @app.post("/financial-advice")
 async def get_financial_advice(request: QueryRequest):
