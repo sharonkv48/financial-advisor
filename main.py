@@ -105,10 +105,11 @@ class FinancialAdvisorBot:
             - Provide concise, professional financial recommendation
             - Directly address the specific financial question
             - Offer clear, actionable advice
-            - Highlight key financial insights
-            - Generate a factual, research-backed financial report with structured bullet points and no conversational tone.
-            - Write this as if you're a friend giving investment advice in simple words, avoiding corporate jargon.
-            - Write this in a neutral, third-person tone, like a financial news article with statistics and expert opinions.
+            - Focus on factual, research-backed insights.
+            - Maintain a neutral, third-person tone, similar to a financial news article.
+            - Incorporate relevant statistics and expert opinions where necessary.
+            - Avoid unnecessary explanations and conversational language.
+            - Avoid giving conclusions and too many side headings. make it short.
             """
             
             synthesis_response = await model.generate_content_async(synthesis_prompt)
