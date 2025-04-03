@@ -25,6 +25,9 @@ from transaction_rag import process_user_query as process_transaction_query
 # Load environment variables
 load_dotenv()
 
+# Constants
+INDEX_NAME = "financial-encyclopedia"
+
 # Clean response function
 def clean_response(response: str) -> str:
     """
@@ -61,14 +64,6 @@ def is_transaction_query(query: str) -> tuple:
         return True, match.group(1).strip()
     return False, query
 
-# Pinecone Configuration
-try:
-    pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-    index_name = "financial-encyclopedia"
-except Exception as e:
-    print(f"Error initializing Pinecone: {str(e)}")
-    raise
-
 class QueryRequest(BaseModel):
     query: str
     chat_history: Optional[List[dict]] = []  # Add chat history support
@@ -76,6 +71,7 @@ class QueryRequest(BaseModel):
 class FinancialAdvisorBot:
     def __init__(self):
         self.conversational_qa_chain = None
+        self.pinecone_client = None
         # List of Gemini models to try (in order of preference)
         self.gemini_models = [
             "gemini-pro", 
@@ -87,6 +83,9 @@ class FinancialAdvisorBot:
     async def initialize_qa_bot(self):
         """Initialize QA components with Pinecone and Conversational Memory"""
         try:
+            # Initialize Pinecone client here instead of globally
+            self.pinecone_client = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            
             # Initialize embeddings
             hugging_face_embeddings = HuggingFaceEmbeddings(
                 model_name='sentence-transformers/all-MiniLM-L6-V2', 
@@ -94,7 +93,7 @@ class FinancialAdvisorBot:
             )
 
             # Initialize Pinecone vector store
-            pinecone_index = pc.Index(index_name)
+            pinecone_index = self.pinecone_client.Index(INDEX_NAME)
             vectorstore = PineconeVectorStore(
                 index=pinecone_index, 
                 embedding=hugging_face_embeddings,
@@ -316,7 +315,10 @@ class FinancialAdvisorBot:
                     
             # Continue with regular financial advice if not a special query or if special processing failed
             if not self.conversational_qa_chain:
-                raise ValueError("Conversational QA chain not initialized")
+                # Try to initialize if not already initialized
+                await self.initialize_qa_bot()
+                if not self.conversational_qa_chain:
+                    raise ValueError("Conversational QA chain not initialized")
             
             # Prepare chat history in the format expected by the chain
             formatted_history = [(entry['query'], entry['response']) for entry in chat_history] if chat_history else []
@@ -375,12 +377,24 @@ async def startup_event():
         # We don't want to stop the app from starting, but the endpoints won't work
         # until the bot is properly initialized
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    try:
+        # The Pinecone client will be garbage collected
+        bot.pinecone_client = None
+        bot.conversational_qa_chain = None
+        print("Successfully cleaned up resources")
+    except Exception as e:
+        print(f"Shutdown error: {str(e)}")
+
 @app.post("/financial-advice")
 async def get_financial_advice(request: QueryRequest):
     """Endpoint to get financial advice with conversational context"""
     try:
-        if not bot.conversational_qa_chain:
-            # Attempt to initialize again if not already done
+        # Check if bot needs initialization or reinitialization
+        if not bot.conversational_qa_chain or not bot.pinecone_client:
+            print("Bot not initialized, attempting initialization...")
             await bot.initialize_qa_bot()
             
         response = await bot.generate_response(request.query, request.chat_history)
@@ -432,6 +446,8 @@ async def health_check():
         # Check if the bot is properly initialized
         if bot.conversational_qa_chain is None:
             return {"status": "degraded", "message": "Conversational QA chain not initialized"}
+        if bot.pinecone_client is None:
+            return {"status": "degraded", "message": "Pinecone client not initialized"}
         return {"status": "healthy"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
