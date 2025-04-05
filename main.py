@@ -15,6 +15,7 @@ from langchain.memory import ConversationBufferMemory
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 import re
+import time
 
 # Import news functionality
 from news import get_news_response, is_news_query
@@ -24,9 +25,6 @@ from transaction_rag import process_user_query as process_transaction_query
 
 # Load environment variables
 load_dotenv()
-
-# Constants
-INDEX_NAME = "financial-encyclopedia"
 
 # Clean response function
 def clean_response(response: str) -> str:
@@ -64,6 +62,36 @@ def is_transaction_query(query: str) -> tuple:
         return True, match.group(1).strip()
     return False, query
 
+# Initialize Pinecone globally
+pc = None
+
+def initialize_pinecone():
+    """Initialize Pinecone client with retry mechanism"""
+    global pc
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            print("Pinecone initialized successfully")
+            return pc
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Error initializing Pinecone (attempt {attempt+1}/{max_retries}): {str(e)}")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print(f"Failed to initialize Pinecone after {max_retries} attempts: {str(e)}")
+                raise
+
+# Initialize Pinecone on module import
+try:
+    pc = initialize_pinecone()
+    index_name = "financial-encyclopedia"
+except Exception as e:
+    print(f"Initial Pinecone initialization failed: {str(e)}")
+
 class QueryRequest(BaseModel):
     query: str
     chat_history: Optional[List[dict]] = []  # Add chat history support
@@ -71,7 +99,8 @@ class QueryRequest(BaseModel):
 class FinancialAdvisorBot:
     def __init__(self):
         self.conversational_qa_chain = None
-        self.pinecone_client = None
+        self.last_connection_check = 0
+        self.connection_check_interval = 300  # 5 minutes
         # List of Gemini models to try (in order of preference)
         self.gemini_models = [
             "gemini-pro", 
@@ -79,29 +108,38 @@ class FinancialAdvisorBot:
             "gemini-1.5-pro",
             "models/gemini-pro"
         ]
+        # Initialize components
+        self.hugging_face_embeddings = None
+        self.vectorstore = None
+        self.groq_model = None
+        self.memory = None
+        self.qa_prompt = None
     
     async def initialize_qa_bot(self):
         """Initialize QA components with Pinecone and Conversational Memory"""
+        global pc
+        
         try:
-            # Initialize Pinecone client here instead of globally
-            self.pinecone_client = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            # Check if Pinecone needs reinitialization
+            if pc is None:
+                pc = initialize_pinecone()
             
             # Initialize embeddings
-            hugging_face_embeddings = HuggingFaceEmbeddings(
+            self.hugging_face_embeddings = HuggingFaceEmbeddings(
                 model_name='sentence-transformers/all-MiniLM-L6-V2', 
                 model_kwargs={'device': 'cpu'}
             )
 
             # Initialize Pinecone vector store
-            pinecone_index = self.pinecone_client.Index(INDEX_NAME)
-            vectorstore = PineconeVectorStore(
+            pinecone_index = pc.Index(index_name)
+            self.vectorstore = PineconeVectorStore(
                 index=pinecone_index, 
-                embedding=hugging_face_embeddings,
+                embedding=self.hugging_face_embeddings,
                 text_key='text'
             )
         
             # Initialize Groq LLM with Llama3 model
-            groq_model = ChatGroq(
+            self.groq_model = ChatGroq(
                 model_name="llama3-8b-8192",
                 groq_api_key=os.getenv('GROQ_API_KEY'),
                 temperature=0.5,
@@ -109,7 +147,7 @@ class FinancialAdvisorBot:
             )
 
             # Create Conversation Memory
-            memory = ConversationBufferMemory(
+            self.memory = ConversationBufferMemory(
                 memory_key="chat_history", 
                 return_messages=True,
                 input_key='question',
@@ -117,7 +155,7 @@ class FinancialAdvisorBot:
             )
 
             # Updated Prompt Template with Confident Tone
-            qa_prompt = PromptTemplate(
+            self.qa_prompt = PromptTemplate(
                 template="""
                 YOU ARE THE DEFINITIVE FINANCIAL ADVISOR FOR INDIAN MARKETS. 
 
@@ -159,19 +197,45 @@ class FinancialAdvisorBot:
 
             # Use ConversationalRetrievalChain with explicit output key
             self.conversational_qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=groq_model,
-                retriever=vectorstore.as_retriever(search_kwargs={'k': 2}),
-                memory=memory,
+                llm=self.groq_model,
+                retriever=self.vectorstore.as_retriever(search_kwargs={'k': 2}),
+                memory=self.memory,
                 return_source_documents=True,
-                combine_docs_chain_kwargs={'prompt': qa_prompt},
+                combine_docs_chain_kwargs={'prompt': self.qa_prompt},
                 chain_type='stuff',
                 output_key='answer'  # Explicitly set output key
             )
+            
+            # Update connection check timestamp
+            self.last_connection_check = time.time()
             print("Conversational QA bot initialized successfully")
+            
         except Exception as e:
             error_detail = f"Error initializing Conversational QA bot: {str(e)}\n{traceback.format_exc()}"
             print(error_detail)
             raise Exception(error_detail)
+    
+    async def check_connection(self):
+        """Check if connection is active and reinitialize if needed"""
+        current_time = time.time()
+        
+        # Only check connection if interval has passed
+        if current_time - self.last_connection_check > self.connection_check_interval:
+            try:
+                # Test the Pinecone connection with a simple operation
+                if pc is not None:
+                    # Update the timestamp regardless of outcome to prevent frequent checks
+                    self.last_connection_check = current_time
+                    
+                    # Try to list indexes to verify connection
+                    _ = pc.list_indexes()
+                    print("Connection check: Pinecone connection is active")
+                else:
+                    print("Connection check: Pinecone client is None, reinitializing...")
+                    await self.initialize_qa_bot()
+            except Exception as e:
+                print(f"Connection check: Error with Pinecone connection, reinitializing: {str(e)}")
+                await self.initialize_qa_bot()
     
     async def try_gemini_synthesis(self, llama_answer, query, chat_history):
         """Try to use Gemini for synthesis, with fallbacks for different model names"""
@@ -279,11 +343,47 @@ class FinancialAdvisorBot:
         except Exception as e:
             print(f"Error in transaction response enrichment: {str(e)}")
             return transaction_response
+    
+    async def handle_pinecone_session_error(self, error, query, formatted_history, retry_count=0):
+        """Handle Pinecone session closed errors with retries"""
+        max_retries = 3
+        
+        if retry_count >= max_retries:
+            print(f"Failed to recover from Pinecone session error after {max_retries} attempts")
+            raise error
+            
+        print(f"Handling Pinecone session error (attempt {retry_count+1}/{max_retries}): {str(error)}")
+        
+        # Reinitialize everything
+        global pc
+        try:
+            # Reinitialize Pinecone client first
+            pc = initialize_pinecone()
+            # Then reinitialize the QA chain
+            await self.initialize_qa_bot()
+            
+            print("Successfully reinitialized after session error")
+            
+            # Try the query again with fresh connections
+            res = await self.conversational_qa_chain.ainvoke({
+                "question": query,
+                "chat_history": formatted_history
+            })
+            
+            return res
+        except Exception as retry_error:
+            print(f"Error during session recovery: {str(retry_error)}")
+            # Increase retry count and try again with exponential backoff
+            await asyncio.sleep(2 ** retry_count)
+            return await self.handle_pinecone_session_error(error, query, formatted_history, retry_count + 1)
         
     async def generate_response(self, query, chat_history):
         """Generate response using Llama3 and optionally Gemini for synthesis"""
         try:
-            # First, check if this is a transaction query
+            # First, perform connection check if needed
+            await self.check_connection()
+            
+            # Check if this is a transaction query
             is_transaction, transaction_query = is_transaction_query(query)
             if is_transaction:
                 print(f"Detected transaction query: {transaction_query}")
@@ -315,19 +415,33 @@ class FinancialAdvisorBot:
                     
             # Continue with regular financial advice if not a special query or if special processing failed
             if not self.conversational_qa_chain:
-                # Try to initialize if not already initialized
+                print("QA chain not initialized, initializing now...")
                 await self.initialize_qa_bot()
-                if not self.conversational_qa_chain:
-                    raise ValueError("Conversational QA chain not initialized")
             
             # Prepare chat history in the format expected by the chain
             formatted_history = [(entry['query'], entry['response']) for entry in chat_history] if chat_history else []
             
-            # Get response from Llama3
-            res = await self.conversational_qa_chain.ainvoke({
-                "question": query,
-                "chat_history": formatted_history
-            })
+            try:
+                # Get response from Llama3
+                res = await self.conversational_qa_chain.ainvoke({
+                    "question": query,
+                    "chat_history": formatted_history
+                })
+            except RuntimeError as e:
+                # Check if it's a session closed error
+                if "Session is closed" in str(e):
+                    print("Detected session closed error, attempting recovery...")
+                    res = await self.handle_pinecone_session_error(e, query, formatted_history)
+                else:
+                    # If it's a different RuntimeError, re-raise
+                    raise
+            except Exception as e:
+                # For any other exception, try to reinitialize but don't retry the query
+                if "session" in str(e).lower() or "connection" in str(e).lower():
+                    print(f"Potential connection issue detected: {str(e)}")
+                    await self.initialize_qa_bot()
+                # Re-raise the exception after trying to fix the connection
+                raise
             
             # Explicitly extract the answer
             llama_answer = res['answer']
@@ -377,24 +491,12 @@ async def startup_event():
         # We don't want to stop the app from starting, but the endpoints won't work
         # until the bot is properly initialized
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on shutdown"""
-    try:
-        # The Pinecone client will be garbage collected
-        bot.pinecone_client = None
-        bot.conversational_qa_chain = None
-        print("Successfully cleaned up resources")
-    except Exception as e:
-        print(f"Shutdown error: {str(e)}")
-
 @app.post("/financial-advice")
 async def get_financial_advice(request: QueryRequest):
     """Endpoint to get financial advice with conversational context"""
     try:
-        # Check if bot needs initialization or reinitialization
-        if not bot.conversational_qa_chain or not bot.pinecone_client:
-            print("Bot not initialized, attempting initialization...")
+        if not bot.conversational_qa_chain:
+            # Attempt to initialize again if not already done
             await bot.initialize_qa_bot()
             
         response = await bot.generate_response(request.query, request.chat_history)
@@ -443,11 +545,56 @@ async def list_gemini_models():
 async def health_check():
     """Simple health check endpoint"""
     try:
+        global pc
+        
+        # More comprehensive health check
+        status = {
+            "app": "healthy",
+            "pinecone": "unknown",
+            "qa_chain": "unknown"
+        }
+        
+        # Check Pinecone connection
+        try:
+            if pc is None:
+                status["pinecone"] = "not_initialized"
+            else:
+                # Try listing indexes to verify connection
+                _ = pc.list_indexes()
+                status["pinecone"] = "healthy"
+        except Exception as e:
+            status["pinecone"] = f"unhealthy: {str(e)}"
+            
         # Check if the bot is properly initialized
         if bot.conversational_qa_chain is None:
-            return {"status": "degraded", "message": "Conversational QA chain not initialized"}
-        if bot.pinecone_client is None:
-            return {"status": "degraded", "message": "Pinecone client not initialized"}
-        return {"status": "healthy"}
+            status["qa_chain"] = "not_initialized"
+        else:
+            status["qa_chain"] = "healthy"
+            
+        # Overall status
+        if "unhealthy" in status.values() or "not_initialized" in status.values():
+            status["app"] = "degraded"
+            
+        return status
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+
+# Add connection reset endpoint for manual intervention
+@app.post("/reset-connections")
+async def reset_connections():
+    """Manual endpoint to reset all connections"""
+    try:
+        global pc
+        
+        # Reset Pinecone client
+        pc = None
+        pc = initialize_pinecone()
+        
+        # Reset the bot
+        await bot.initialize_qa_bot()
+        
+        return {"status": "success", "message": "All connections reset successfully"}
+    except Exception as e:
+        error_detail = f"Failed to reset connections: {str(e)}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
