@@ -1,7 +1,8 @@
 import os
 import asyncio
 import traceback
-from fastapi import FastAPI, HTTPException
+import logging
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -25,6 +26,10 @@ from transaction_rag import process_user_query as process_transaction_query
 
 # Load environment variables
 load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("financial-advisor-bot")
 
 # Clean response function
 def clean_response(response: str) -> str:
@@ -64,6 +69,7 @@ def is_transaction_query(query: str) -> tuple:
 
 # Initialize Pinecone globally
 pc = None
+keep_alive_task = None
 
 def initialize_pinecone():
     """Initialize Pinecone client with retry mechanism"""
@@ -74,15 +80,15 @@ def initialize_pinecone():
     for attempt in range(max_retries):
         try:
             pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-            print("Pinecone initialized successfully")
+            logger.info("Pinecone initialized successfully")
             return pc
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"Error initializing Pinecone (attempt {attempt+1}/{max_retries}): {str(e)}")
+                logger.error(f"Error initializing Pinecone (attempt {attempt+1}/{max_retries}): {str(e)}")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
-                print(f"Failed to initialize Pinecone after {max_retries} attempts: {str(e)}")
+                logger.error(f"Failed to initialize Pinecone after {max_retries} attempts: {str(e)}")
                 raise
 
 # Initialize Pinecone on module import
@@ -90,7 +96,7 @@ try:
     pc = initialize_pinecone()
     index_name = "financial-encyclopedia"
 except Exception as e:
-    print(f"Initial Pinecone initialization failed: {str(e)}")
+    logger.error(f"Initial Pinecone initialization failed: {str(e)}")
 
 class QueryRequest(BaseModel):
     query: str
@@ -208,11 +214,11 @@ class FinancialAdvisorBot:
             
             # Update connection check timestamp
             self.last_connection_check = time.time()
-            print("Conversational QA bot initialized successfully")
+            logger.info("Conversational QA bot initialized successfully")
             
         except Exception as e:
             error_detail = f"Error initializing Conversational QA bot: {str(e)}\n{traceback.format_exc()}"
-            print(error_detail)
+            logger.error(error_detail)
             raise Exception(error_detail)
     
     async def check_connection(self):
@@ -229,12 +235,12 @@ class FinancialAdvisorBot:
                     
                     # Try to list indexes to verify connection
                     _ = pc.list_indexes()
-                    print("Connection check: Pinecone connection is active")
+                    logger.info("Connection check: Pinecone connection is active")
                 else:
-                    print("Connection check: Pinecone client is None, reinitializing...")
+                    logger.warning("Connection check: Pinecone client is None, reinitializing...")
                     await self.initialize_qa_bot()
             except Exception as e:
-                print(f"Connection check: Error with Pinecone connection, reinitializing: {str(e)}")
+                logger.error(f"Connection check: Error with Pinecone connection, reinitializing: {str(e)}")
                 await self.initialize_qa_bot()
     
     async def try_gemini_synthesis(self, llama_answer, query, chat_history):
@@ -242,7 +248,7 @@ class FinancialAdvisorBot:
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         
         if not gemini_api_key:
-            print("Gemini API key not found, returning Llama response only")
+            logger.warning("Gemini API key not found, returning Llama response only")
             return llama_answer
             
         genai.configure(api_key=gemini_api_key)
@@ -253,7 +259,7 @@ class FinancialAdvisorBot:
         # Try different model names
         for model_name in self.gemini_models:
             try:
-                print(f"Trying Gemini model: {model_name}")
+                logger.info(f"Trying Gemini model: {model_name}")
                 model = genai.GenerativeModel(model_name)
                 
                 synthesis_prompt = f"""
@@ -280,14 +286,14 @@ class FinancialAdvisorBot:
                 """
                 
                 synthesis_response = await model.generate_content_async(synthesis_prompt)
-                print(f"Successfully used Gemini model: {model_name}")
+                logger.info(f"Successfully used Gemini model: {model_name}")
                 return synthesis_response.text.strip()
             except Exception as e:
-                print(f"Error with Gemini model {model_name}: {str(e)}")
+                logger.error(f"Error with Gemini model {model_name}: {str(e)}")
                 continue
         
         # If all Gemini models fail, return the Llama response
-        print("All Gemini models failed, returning Llama response")
+        logger.warning("All Gemini models failed, returning Llama response")
         return llama_answer
     
     def enrich_transaction_response(self, transaction_response, query):
@@ -296,7 +302,7 @@ class FinancialAdvisorBot:
             gemini_api_key = os.getenv('GEMINI_API_KEY')
             
             if not gemini_api_key:
-                print("Gemini API key not found, returning original transaction response")
+                logger.warning("Gemini API key not found, returning original transaction response")
                 return transaction_response
                 
             genai.configure(api_key=gemini_api_key)
@@ -304,7 +310,7 @@ class FinancialAdvisorBot:
             # Try different model names for a synchronous call
             for model_name in self.gemini_models:
                 try:
-                    print(f"Trying Gemini model for transaction enrichment: {model_name}")
+                    logger.info(f"Trying Gemini model for transaction enrichment: {model_name}")
                     model = genai.GenerativeModel(model_name)
                     
                     enrichment_prompt = f"""
@@ -332,16 +338,16 @@ class FinancialAdvisorBot:
                     """
                     
                     enriched_response = model.generate_content(enrichment_prompt)
-                    print(f"Successfully enriched transaction response with {model_name}")
+                    logger.info(f"Successfully enriched transaction response with {model_name}")
                     return clean_response(enriched_response.text.strip())
                 except Exception as e:
-                    print(f"Error enriching with Gemini model {model_name}: {str(e)}")
+                    logger.error(f"Error enriching with Gemini model {model_name}: {str(e)}")
                     continue
             
             # If all models fail, return the original response
             return transaction_response
         except Exception as e:
-            print(f"Error in transaction response enrichment: {str(e)}")
+            logger.error(f"Error in transaction response enrichment: {str(e)}")
             return transaction_response
     
     async def handle_pinecone_session_error(self, error, query, formatted_history, retry_count=0):
@@ -349,10 +355,10 @@ class FinancialAdvisorBot:
         max_retries = 3
         
         if retry_count >= max_retries:
-            print(f"Failed to recover from Pinecone session error after {max_retries} attempts")
+            logger.error(f"Failed to recover from Pinecone session error after {max_retries} attempts")
             raise error
             
-        print(f"Handling Pinecone session error (attempt {retry_count+1}/{max_retries}): {str(error)}")
+        logger.info(f"Handling Pinecone session error (attempt {retry_count+1}/{max_retries}): {str(error)}")
         
         # Reinitialize everything
         global pc
@@ -362,7 +368,7 @@ class FinancialAdvisorBot:
             # Then reinitialize the QA chain
             await self.initialize_qa_bot()
             
-            print("Successfully reinitialized after session error")
+            logger.info("Successfully reinitialized after session error")
             
             # Try the query again with fresh connections
             res = await self.conversational_qa_chain.ainvoke({
@@ -372,7 +378,7 @@ class FinancialAdvisorBot:
             
             return res
         except Exception as retry_error:
-            print(f"Error during session recovery: {str(retry_error)}")
+            logger.error(f"Error during session recovery: {str(retry_error)}")
             # Increase retry count and try again with exponential backoff
             await asyncio.sleep(2 ** retry_count)
             return await self.handle_pinecone_session_error(error, query, formatted_history, retry_count + 1)
@@ -386,36 +392,36 @@ class FinancialAdvisorBot:
             # Check if this is a transaction query
             is_transaction, transaction_query = is_transaction_query(query)
             if is_transaction:
-                print(f"Detected transaction query: {transaction_query}")
+                logger.info(f"Detected transaction query: {transaction_query}")
                 try:
                     # Process the transaction query
                     transaction_response = process_transaction_query(transaction_query)
-                    print("Successfully retrieved transaction response")
+                    logger.info("Successfully retrieved transaction response")
                     
                     # Enrich the transaction response with financial advisor tone
                     enriched_response = self.enrich_transaction_response(transaction_response, transaction_query)
                     return enriched_response
                 except Exception as e:
                     transaction_error = f"Error processing transaction query: {str(e)}"
-                    print(transaction_error)
+                    logger.error(transaction_error)
                     # Fall back to regular financial advice if transaction processing fails
             
             # Then, check if this is a news-related query (if not a transaction query or transaction processing failed)
             if is_news_query(query):
-                print(f"Detected news query: {query}")
+                logger.info(f"Detected news query: {query}")
                 # Use the news module to get a response
                 try:
                     news_response = get_news_response(query)
-                    print("Successfully retrieved news response")
+                    logger.info("Successfully retrieved news response")
                     return news_response
                 except Exception as e:
                     news_error = f"Error retrieving news: {str(e)}"
-                    print(news_error)
+                    logger.error(news_error)
                     # Fall back to regular financial advice if news retrieval fails
                     
             # Continue with regular financial advice if not a special query or if special processing failed
             if not self.conversational_qa_chain:
-                print("QA chain not initialized, initializing now...")
+                logger.info("QA chain not initialized, initializing now...")
                 await self.initialize_qa_bot()
             
             # Prepare chat history in the format expected by the chain
@@ -430,7 +436,7 @@ class FinancialAdvisorBot:
             except RuntimeError as e:
                 # Check if it's a session closed error
                 if "Session is closed" in str(e):
-                    print("Detected session closed error, attempting recovery...")
+                    logger.warning("Detected session closed error, attempting recovery...")
                     res = await self.handle_pinecone_session_error(e, query, formatted_history)
                 else:
                     # If it's a different RuntimeError, re-raise
@@ -438,7 +444,7 @@ class FinancialAdvisorBot:
             except Exception as e:
                 # For any other exception, try to reinitialize but don't retry the query
                 if "session" in str(e).lower() or "connection" in str(e).lower():
-                    print(f"Potential connection issue detected: {str(e)}")
+                    logger.warning(f"Potential connection issue detected: {str(e)}")
                     await self.initialize_qa_bot()
                 # Re-raise the exception after trying to fix the connection
                 raise
@@ -458,13 +464,29 @@ class FinancialAdvisorBot:
                 
                 return final_response
             except Exception as e:
-                print(f"Error with Gemini synthesis, using Llama response: {str(e)}")
+                logger.error(f"Error with Gemini synthesis, using Llama response: {str(e)}")
                 return llama_answer
                 
         except Exception as e:
             error_detail = f"Response generation error: {str(e)}\n{traceback.format_exc()}"
-            print(error_detail)
+            logger.error(error_detail)
             raise Exception(error_detail)
+
+# Keep-alive ping function
+async def keep_alive_ping():
+    """Background task that pings the health endpoint to prevent shutdown due to inactivity"""
+    while True:
+        try:
+            logger.info("Performing keep-alive ping")
+            # Access the health endpoint
+            status = await health_check()
+            logger.info(f"Keep-alive ping result: {status}")
+            # Wait for 10 minutes before the next ping
+            await asyncio.sleep(600)  # 600 seconds = 10 minutes
+        except Exception as e:
+            logger.error(f"Error in keep-alive ping: {str(e)}")
+            # Even if there's an error, continue pinging
+            await asyncio.sleep(60)  # Wait a shorter time if there was an error
 
 # Create FastAPI app
 app = FastAPI()
@@ -483,13 +505,33 @@ bot = FinancialAdvisorBot()
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize the QA bot on startup"""
+    """Initialize the QA bot on startup and start the keep-alive task"""
+    global keep_alive_task
+    
     try:
+        # Initialize the QA bot
         await bot.initialize_qa_bot()
+        
+        # Start the keep-alive task
+        keep_alive_task = asyncio.create_task(keep_alive_ping())
+        logger.info("Keep-alive task started")
     except Exception as e:
-        print(f"Startup error: {str(e)}")
+        logger.error(f"Startup error: {str(e)}")
         # We don't want to stop the app from starting, but the endpoints won't work
         # until the bot is properly initialized
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    global keep_alive_task
+    
+    # Cancel the keep-alive task if it exists
+    if keep_alive_task is not None:
+        keep_alive_task.cancel()
+        try:
+            await keep_alive_task
+        except asyncio.CancelledError:
+            logger.info("Keep-alive task cancelled")
 
 @app.post("/financial-advice")
 async def get_financial_advice(request: QueryRequest):
@@ -516,7 +558,7 @@ async def get_financial_advice(request: QueryRequest):
         }
     except Exception as e:
         error_detail = f"Error processing request: {str(e)}"
-        print(f"{error_detail}\n{traceback.format_exc()}")
+        logger.error(f"{error_detail}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
 
 # Add an endpoint to list available Gemini models
@@ -596,5 +638,5 @@ async def reset_connections():
         return {"status": "success", "message": "All connections reset successfully"}
     except Exception as e:
         error_detail = f"Failed to reset connections: {str(e)}"
-        print(error_detail)
+        logger.error(error_detail)
         raise HTTPException(status_code=500, detail=error_detail)
