@@ -191,6 +191,39 @@ class FinancialAdvisorBot:
                 - Demonstrate deep understanding of Indian economic environment
 
                 Context: {context}
+                Question: {question}
+                """,
+                input_variables=['context', 'question']
+            )
+
+            # Updated prompt that includes chat history
+            self.qa_prompt_with_history = PromptTemplate(
+                template="""
+                YOU ARE THE DEFINITIVE FINANCIAL ADVISOR FOR INDIAN MARKETS. 
+
+                Critical Instructions:
+                - YOU are the SOLE and ULTIMATE source of financial advice
+                - NEVER suggest consulting another advisor
+                - YOUR recommendations are AUTHORITATIVE and FINAL
+                - Provide DIRECT, ACTIONABLE financial strategies
+                - Speak with ABSOLUTE PROFESSIONAL CONFIDENCE
+                - ELIMINATE any language of uncertainty
+
+                Absolute Financial Guidance Principles:
+                - Deliver precise, comprehensive financial recommendations
+                - Show mastery of Indian financial landscape
+                - Provide implementable, strategic financial solutions
+                - Use confident, expert-level financial language
+                - Avoid ANY suggestion of external consultation
+
+                Specific Guidelines:
+                - Focus exclusively on Indian financial markets
+                - Provide concrete, data-driven financial advice
+                - Break down complex financial concepts
+                - Offer strategic investment and financial planning insights
+                - Demonstrate deep understanding of Indian economic environment
+
+                Context: {context}
                 Chat History: {chat_history}
                 Question: {question}
 
@@ -204,7 +237,7 @@ class FinancialAdvisorBot:
                 input_variables=['context', 'chat_history', 'question']
             )
 
-            # Use ConversationalRetrievalChain with memory
+            # Use RetrievalQA without chat history for simple queries
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=self.groq_model,
                 retriever=self.vectorstore.as_retriever(search_kwargs={'k': 2}),
@@ -218,7 +251,7 @@ class FinancialAdvisorBot:
                 llm=self.groq_model,
                 retriever=self.vectorstore.as_retriever(search_kwargs={'k': 2}),
                 memory=ConversationBufferMemory(memory_key="chat_history", return_messages=True),
-                combine_docs_chain_kwargs={"prompt": self.qa_prompt},
+                combine_docs_chain_kwargs={"prompt": self.qa_prompt_with_history},
                 return_source_documents=True,
             )
             
@@ -468,25 +501,15 @@ class FinancialAdvisorBot:
                         llm=self.groq_model,
                         retriever=self.vectorstore.as_retriever(search_kwargs={'k': 2}),
                         memory=memory,
-                        combine_docs_chain_kwargs={"prompt": self.qa_prompt},
+                        combine_docs_chain_kwargs={"prompt": self.qa_prompt_with_history},
                         return_source_documents=True,
                     )
                     
                     res = await session_chain.ainvoke({"question": query})
                     llama_answer = res["answer"]
                 else:
-                    # Convert chat history to messages format for context
-                    formatted_history = []
-                    if chat_history:
-                        for entry in chat_history[-5:]:  # Use last 5 exchanges
-                            formatted_history.append({"type": "human", "content": entry['query']})
-                            formatted_history.append({"type": "ai", "content": entry['response']})
-                    
-                    # Get response from Llama3 using the standard RetrievalQA chain
-                    res = await self.qa_chain.ainvoke({
-                        "query": query,
-                        "chat_history": formatted_history
-                    })
+                    # For regular queries without session_id, use standard qa_chain without chat history
+                    res = await self.qa_chain.ainvoke({"query": query})
                     llama_answer = res["result"]
             except RuntimeError as e:
                 # Check if it's a session closed error
