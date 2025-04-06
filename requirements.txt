@@ -2,7 +2,7 @@ fastapi
 uvicorn
 python-dotenv
 google-generativeai
-langchain
+langchain==0.3.23
 langchain_groq
 pinecone-client
 pydantic
