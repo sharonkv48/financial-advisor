@@ -12,4 +12,4 @@ langchain-pinecone
 langchain_huggingface
 motor
 transformers==4.50.2
-sentence-transformers==2.2.2
+sentence-transformers==4.0.1
