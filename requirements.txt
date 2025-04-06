@@ -11,5 +11,5 @@ langchain-community
 langchain-pinecone
 langchain_huggingface
 motor
-transformers==4.36.0
+transformers==4.50.2
 sentence-transformers==2.2.2
